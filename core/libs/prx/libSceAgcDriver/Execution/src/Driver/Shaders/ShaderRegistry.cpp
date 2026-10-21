@@ -27,6 +27,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <list>
 #include <map>
@@ -53,7 +54,22 @@
 
 namespace AgcDriver::DriverDetail {
 
+namespace {
+
+struct PreparationWorkerStorage {};
+
+bool& PreparationWorker() {
+    return HostThreadLocal<bool, PreparationWorkerStorage>();
+}
+
+}
+
 std::shared_ptr<const ShaderRecompiler::SourceHandle> PrepareShaderWithDiagnostics(const ShaderRecompiler::RecompileRequest& request, ShaderRecompiler::ShaderPreparationContext* preparation) {
+    if (!PreparationWorker()) {
+        std::shared_ptr<const ShaderRecompiler::SourceHandle> handle;
+        RunRegistrationPreparation([&] { handle = PrepareShaderWithDiagnostics(request, preparation); });
+        return handle;
+    }
     std::exception_ptr failure;
     std::string dump;
     try {
@@ -1272,6 +1288,7 @@ private:
 #endif
 
     static void* Main(void* argument) {
+        PreparationWorker() = true;
         auto& pool = *static_cast<RegistrationPreparePool*>(argument);
         if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("shader prepare", TraceThread::DefaultCapacity / 8);
         for (;;) {
@@ -1355,6 +1372,20 @@ void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapsho
     }, preparedKey);
 }
 
+}
+
+void RunRegistrationPreparation(std::function<void()> task) {
+    if (PreparationWorker()) {
+        task();
+        return;
+    }
+    auto pending = std::make_shared<std::packaged_task<void()>>([task = std::move(task)] {
+        if (!PreparationWorker()) throw std::runtime_error("shader preparation has no available worker thread");
+        task();
+    });
+    auto done = pending->get_future();
+    SubmitRegistrationPreparation([pending] { (*pending)(); });
+    done.get();
 }
 
 void SubmitRegistrationPreparation(std::function<void()> task, const PreparedShaders* prepared) {

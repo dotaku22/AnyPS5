@@ -97,12 +97,36 @@ int main() {
         AgcDriver::DriverDetail::Driver::Get();
         CheckPool("registration preparation", [](std::function<void()> task) { AgcDriver::DriverDetail::SubmitRegistrationPreparation(std::move(task)); });
         CheckPool("library prebuild", [](std::function<void()> task) { AgcDriver::DriverDetail::SubmitLibraryPrebuild(std::move(task)); });
+        CheckPool("synchronous preparation", [](std::function<void()> task) { AgcDriver::DriverDetail::RunRegistrationPreparation(std::move(task)); });
+        bool completed = false;
+        AgcDriver::DriverDetail::RunRegistrationPreparation([&] {
+            const auto outer = std::this_thread::get_id();
+            AgcDriver::DriverDetail::RunRegistrationPreparation([&] {
+                Require(std::this_thread::get_id() == outer, "nested preparation left its worker");
+                completed = true;
+            });
+        });
+        Require(completed, "synchronous preparation returned before its nested task completed");
+        bool propagated = false;
+        try {
+            AgcDriver::DriverDetail::RunRegistrationPreparation([] { throw std::logic_error("preparation failure"); });
+        } catch (const std::logic_error& error) {
+            propagated = std::string(error.what()) == "preparation failure";
+        }
+        Require(propagated, "synchronous preparation did not propagate the original exception");
         const char* prebuildThreads = std::getenv("APS5_PREBUILD_THREADS");
         const auto started = std::max(2u, std::thread::hardware_concurrency() / 2u) + (prebuildThreads != nullptr ? std::max(1u, static_cast<unsigned>(std::strtoul(prebuildThreads, nullptr, 10))) : 1u);
         const auto live = AgcDriver::DriverDetail::RegistrationPreparationThreads();
         Require(live == started, "the preparation and prebuild pools count " + std::to_string(live) + " live threads of the " + std::to_string(started) + " they started");
         AgcDriver::DriverDetail::CloseRegistrationPreparation();
         Require(AgcDriver::DriverDetail::RegistrationPreparationThreads() == 0, "closing the preparation and prebuild pools left " + std::to_string(AgcDriver::DriverDetail::RegistrationPreparationThreads()) + " live threads");
+        bool rejected = false;
+        try {
+            AgcDriver::DriverDetail::RunRegistrationPreparation([] { throw std::logic_error("ran after shutdown"); });
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()) == "shader preparation has no available worker thread";
+        }
+        Require(rejected, "synchronous preparation used the caller's stack after shutdown");
         std::puts("registration prepare stack tests passed");
         return 0;
     } catch (const std::exception& error) {
