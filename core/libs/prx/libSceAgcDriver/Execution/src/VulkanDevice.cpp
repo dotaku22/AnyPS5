@@ -1774,6 +1774,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
     state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
+    enabled.independentBlend = available.independentBlend;
     enabled.dualSrcBlend = available.dualSrcBlend;
     state->dualSrcBlend = enabled.dualSrcBlend == VK_TRUE;
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
