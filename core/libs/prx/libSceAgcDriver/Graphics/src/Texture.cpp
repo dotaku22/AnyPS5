@@ -329,7 +329,11 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         }
 
         const auto geometry = DescribeSurface(descriptor);
-        const auto& mips = geometry.mips;
+        const auto hostMipCount = std::min(descriptor.mipCount, static_cast<std::uint32_t>(std::bit_width(std::max({descriptor.width, descriptor.height, geometry.imageDepth}))));
+        Require(hostMipCount != 0u && descriptor.baseLevel < hostMipCount && std::min(descriptor.lastLevel, descriptor.mipCount - 1u) < hostMipCount, "sampled texture view exposes mip levels outside its dimensional chain (" + std::to_string(descriptor.width) + "x" + std::to_string(descriptor.height) + "x" + std::to_string(geometry.imageDepth) + ", view " + std::to_string(descriptor.baseLevel) + ".." + std::to_string(descriptor.lastLevel) + ", allocated " + std::to_string(descriptor.mipCount) + ")");
+        const auto mips = std::span(geometry.mips).first(hostMipCount);
+        auto hostDescriptor = descriptor;
+        hostDescriptor.mipCount = hostMipCount;
         const auto arrayLayers = geometry.layers;
         const auto elementBytes = BytesPerElement(descriptor.format);
         AGC_LOG_DEFERRED(stdout, "Texture address=0x%llx %ux%u mips=%u layers=%u dim=%d tile=%d format=%u vk=%d element=%u", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, arrayLayers,
@@ -349,7 +353,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.imageType = depth1D ? VK_IMAGE_TYPE_2D : ImageTypeFor(descriptor.dimension);
         imageInfo.format = vkFormat;
         imageInfo.extent = {descriptor.width, depth1D ? 1u : descriptor.height, geometry.imageDepth};
-        imageInfo.mipLevels = descriptor.mipCount;
+        imageInfo.mipLevels = hostMipCount;
         Require(geometry.imageLayers <= context.limits.maxImageArrayLayers, "a texture array with more layers than maxImageArrayLayers is not implemented");
         imageInfo.arrayLayers = geometry.imageLayers;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -372,7 +376,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const VkImage uploadImage = image;
         std::shared_ptr<OwnedImage> uploadOwned;
         if (srgbExpand) {
-            auto expanded = CreateExpandImage(context, descriptor, geometry.imageDepth, geometry.imageLayers);
+            auto expanded = CreateExpandImage(context, hostDescriptor, geometry.imageDepth, geometry.imageLayers);
             uploadOwned = std::move(owned);
             owned = std::move(expanded.owned);
             image = expanded.image;
@@ -464,14 +468,14 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.image = uploadImage;
-            toTransferDst.subresourceRange = {aspect, 0, descriptor.mipCount, 0, geometry.imageLayers};
+            toTransferDst.subresourceRange = {aspect, 0, hostMipCount, 0, geometry.imageLayers};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
 
             std::vector<VkBufferImageCopy> regions;
             regions.reserve(static_cast<std::size_t>(arrayLayers) * mips.size());
             for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
                 const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
-                for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+                for (std::uint32_t level = 0; level < hostMipCount; ++level) {
                     if (!geometry.HasLayer(level, layer)) continue;
                     const auto& mip = mips[level];
                     VkBufferImageCopy region{};
@@ -495,7 +499,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 toBlit[1] = toTransferDst;
                 toBlit[1].image = image;
                 context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, toBlit.data());
-                RecordExpandBlit(context, commands, uploadImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, descriptor, geometry.imageDepth, geometry.imageLayers);
+                RecordExpandBlit(context, commands, uploadImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, hostDescriptor, geometry.imageDepth, geometry.imageLayers);
             }
             std::unique_ptr<Buffer> dump;
             if (dumpWanted) {
